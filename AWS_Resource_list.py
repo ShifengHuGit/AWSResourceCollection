@@ -1,155 +1,473 @@
-import argparse
 import boto3
-from tabulate import tabulate
-import graphviz
+import json
+import argparse
+import datetime
+import os
+import sys
 
-# Function to list AWS regions
+
+class TeeOutput:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, message):
+        for stream in self.streams:
+            try:
+                stream.write(message)
+                stream.flush()
+            except Exception as e:
+                print(f"Error writing to stream: {e}")
+
+    def flush(self):
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except Exception as e:
+                print(f"Error flushing stream: {e}")
+
+    def close(self):
+        for stream in self.streams:
+            if hasattr(stream, 'close'):
+                try:
+                    stream.close()
+                except Exception as e:
+                    print(f"Error closing stream: {e}")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+def save_region_resources_to_json(region_data, output_dir="output"):
+    """
+    Save region-wise AWS resources to a JSON file.
+
+    :param region_data: A dictionary containing resource data for each region.
+    :param output_dir: Directory to save the JSON file (default: "output").
+    """
+    def json_serializer(obj):
+        if isinstance(obj, datetime.datetime):
+            return obj.isoformat()  # Convert datetime to ISO 8601 string
+        raise TypeError(f"Type {type(obj)} not serializable")
+
+    # Create the output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Generate a timestamped filename
+    timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    filename = f"aws_resources_raw_{timestamp}.json"
+    filepath = os.path.join(output_dir, filename)
+
+    # Save the data to the file
+    with open(filepath, "w") as file:
+        json.dump(region_data, file, indent=4, default=json_serializer)
+
+    print(f"\nAll Data (JSON formatted) saved to {filepath}")
+
 def list_regions():
-    ec2 = boto3.client('ec2')
-    response = ec2.describe_regions()
-    regions = [region['RegionName'] for region in response['Regions']]
-    return regions
+    """List all AWS regions with indices."""
+    ec2 = boto3.client("ec2")
+    regions = ec2.describe_regions()["Regions"]
+    region_list = {i + 1: region["RegionName"] for i, region in enumerate(regions)}
+    return region_list
 
-# Function to collect resources from a specific region
-def collect_resources(region):
-    ec2 = boto3.client('ec2', region_name=region)
-    rds = boto3.client('rds', region_name=region)
-    elb = boto3.client('elbv2', region_name=region)
+def print_table(data, sortKey=None):
+    """
+    Print a table with the given data and headers in a formatted manner.
+    The first column values are merged if they are the same as the previous row.
 
-    # Collect EC2 instances
-    ec2_instances = ec2.describe_instances()
-    ec2_data = []
-    for reservation in ec2_instances['Reservations']:
-        for instance in reservation['Instances']:
-            instance_name = next((tag['Value'] for tag in instance.get('Tags', []) if tag['Key'] == 'Name'), 'N/A')
-            instance_id = instance['InstanceId']
-            instance_type = instance['InstanceType']
-            public_ip = instance.get('PublicIpAddress', 'N/A')
-            vpc_id = instance['VpcId']
-            subnet_id = instance['SubnetId']
+    :param data: List of dictionaries containing the table data.
+    :param headers: List of column headers.
+    """
+    if not data:  # Check if empty
+        print("No data available to display.")
+        return
+    if sortKey:
+        data = sorted(data, key=lambda x: x[sortKey])
+    headers = list(data[0].keys())
+    
+    # Compute the maximum width for each column
+    col_widths = {header: len(header) for header in headers}  # Initialize with header lengths
+    for row in data:
+        for header in headers:
+            col_widths[header] = max(col_widths[header], len(str(row.get(header, ""))))
+
+    # Create a horizontal separator
+    separator = "+".join("-" * (col_widths[header] + 2) for header in headers)
+    separator = f"+{separator}+"
+
+    # Print the header row
+    print(separator)
+    header_row = "| " + " | ".join(f"{header:{col_widths[header]}}" for header in headers) + " |"
+    print(header_row)
+    #print(separator)
+
+    # Track the previous value of the first column
+    prev_vpc = None
+
+    # Print the data rows
+    for i, row in enumerate(data):
+        # If VPC is the same as the previous row, the first column will be empty
+        current_vpc = row.get(headers[0], "")
+
+        if current_vpc == prev_vpc:
+            # For rows with the same VPC, only print empty first column
+            row_to_print = [""] + [str(row.get(header, "")) for header in headers[1:]]
+        else:
+            # For new VPC, print full row with VPC value
+            row_to_print = [str(row.get(header, "")) for header in headers]
+            print(separator)
+
+        # Print the current row
+        data_row = "| " + " | ".join(f"{item:{col_widths[header]}}" for item, header in zip(row_to_print, headers)) + " |"
+        print(data_row)
+
+        # Update the previous VPC
+        prev_vpc = current_vpc
+
+    # Print the closing separator
+    print(separator)
+
+def summarize_security_group_rules(security_group):
+    # Count Inbound Rules
+    inbound_count = len(security_group.get("IpPermissions", []))
+    
+    # Count Outbound Rules
+    outbound_count = len(security_group.get("IpPermissionsEgress", []))
+    
+    # Format the summary
+    summary = f"Inbound Rules: {inbound_count} Outbound Rules: {outbound_count}"
+    return summary
+
+def expand_listeners_with_condensed_fields(lbs):
+    """
+    Expand the 'Listener' field into separate entries for each listener,
+    and leave certain fields empty for the second and subsequent rows.
+    
+    :param lbs: List of Load Balancer dictionaries
+    :return: Expanded list of Load Balancer dictionaries with condensed fields
+    """
+    expanded_lbs = []
+
+    for lb in lbs:
+        base_info = {
+            "Name": lb["Name"],
+            "Type": lb["Type"],
+            "Scheme": lb["Scheme"],
+            "Vpc" : lb["Vpc"],
+            "SecurityGroups": lb["SecurityGroups"],
+        }
+
+        # To Multiple lines
+        for index, listener in enumerate(lb["Listener"]):
+            listener_info = {
+                "Listener": f"Port: {listener['Port']}, Protocol: {listener['Protocol']}, Action: {listener['Action']}"
+            }
+
+            # 
+            if index == 0:
+                row_data = {**base_info, **listener_info}
+            else:
+                row_data = {
+                    "Name": lb["Name"],
+                    "Type": "",
+                    "Scheme": "",
+                    "Vpc" : "",
+                    "SecurityGroups": "",
+                    **listener_info,
+                }
+
+            expanded_lbs.append(row_data)
+
+    return expanded_lbs
+
+def collect_ec2_resources(region):
+    """Collect EC2 instance information in a region."""
+    ec2 = boto3.client("ec2", region_name=region)
+    instances = []
+    ec2_raw = ec2.describe_instances()["Reservations"]
+    for reservation in ec2.describe_instances()["Reservations"]:
+        for instance in reservation["Instances"]:
+            name = next((tag["Value"] for tag in instance.get("Tags", []) if tag["Key"] == "Name"), "N/A")
+            #eni_ids = [eni["NetworkInterfaceId"] for eni in instance.get("NetworkInterfaces", [])]
+            ebs_volumes = [volume["Ebs"]["VolumeId"] for volume in instance.get("BlockDeviceMappings", [])]
+            subnet = instance.get("SubnetId", "N/A")
+            vpc = instance.get("VpcId", "N/A")
+            publicIPv4 = instance.get("PublicIpAddress", "N/A")
+            instances.append({
+                "Name": name,
+                "State": instance["State"]["Name"],
+                "Type": instance["InstanceType"],
+                "InstanceId": instance["InstanceId"],
+                "PublicIP": publicIPv4,
+                "EBS": ebs_volumes,
+                "VPC": vpc,
+                "Subnet": subnet,
+            })
+    return instances, ec2_raw
+
+def collect_ebs_resources(region):
+    """Collect EBS volume information in a region."""
+    ec2 = boto3.client("ec2", region_name=region)
+    volumes = []
+    ebs_raw = ec2.describe_volumes()["Volumes"]
+
+    for volume in ec2.describe_volumes()["Volumes"]:
+        name = next((tag["Value"] for tag in volume.get("Tags", []) if tag["Key"] == "Name"), "N/A")
+        volumes.append({
+            "Name": name,
+            "Size": volume["Size"],
+            "IOPS":volume["Iops"],
+            "VolumeType":volume["VolumeType"],
+            "VolumeId": volume["VolumeId"],
+            "Attached_Instance":volume["Attachments"][0]["InstanceId"],
+        })
+    return volumes,ebs_raw
+
+def collect_lb_resources(region):
+    """Collect Load Balancer and Target Group information in a region."""
+    elbv2 = boto3.client("elbv2", region_name=region)
+    ec2 = boto3.client("ec2", region_name=region)
+    lb_all = {}
+
+    lbs = []
+    lns =[]
+    tg_health = []
+    target_group_info = []
+    lb_all["lb_raw"] = elbv2.describe_load_balancers()["LoadBalancers"]
+    lb_all["lb_target_groups"] = elbv2.describe_target_groups()["TargetGroups"]
+    
+
+    
+    for lb in elbv2.describe_load_balancers()["LoadBalancers"]:
+        lsn_info =[]
+        lb_all["lb_listener"] = elbv2.describe_listeners(LoadBalancerArn=lb["LoadBalancerArn"])["Listeners"]
+        
+        for lns in lb_all["lb_listener"]:
+            action_type = lns["DefaultActions"][0]["Type"]
+            action = action_type
+
+            if action_type == "forward":
+                tg_arn = lns["DefaultActions"][0]["TargetGroupArn"]
+                tg_name = elbv2.describe_target_groups(TargetGroupArns=[tg_arn])["TargetGroups"][0]['TargetGroupName']
+                additional_string=" ("+tg_name+")"
+                action = str(action_type) + additional_string
+            lsn_info.append({
+            #"ListenerArn": lns["ListenerArn"],
+            "Port": lns["Port"],
+            "Protocol" : lns["Protocol"],
+            "Action" : action,
             
-            # Ensure 'VolumeId' exists before adding to list
-            ebs_volumes = []
-            for volume in instance.get('BlockDeviceMappings', []):
-                if 'Ebs' in volume and 'VolumeId' in volume['Ebs']:
-                    ebs_volumes.append(volume['Ebs']['VolumeId'])
-
-            ec2_data.append({
-                'Name': instance_name,
-                'InstanceId': instance_id,
-                'InstanceType': instance_type,
-                'PublicIP': public_ip,
-                'VPC': vpc_id,
-                'Subnet': subnet_id,
-                'EBS Volumes': ', '.join(ebs_volumes)
             })
 
-    # Collect RDS instances
-    rds_instances = rds.describe_db_instances()
-    rds_data = []
-    for db_instance in rds_instances['DBInstances']:
-        rds_data.append({
-            'DBInstanceIdentifier': db_instance['DBInstanceIdentifier'],
-            'Engine': db_instance['Engine'],
-            'Status': db_instance['DBInstanceStatus'],
+        target_groups = elbv2.describe_target_groups(LoadBalancerArn=lb["LoadBalancerArn"])["TargetGroups"]
+        
+        
+        
+        for tg in target_groups:
+            target_health_descriptions = elbv2.describe_target_health(TargetGroupArn=tg["TargetGroupArn"])["TargetHealthDescriptions"]
+            tg_health.append({"TargetGroupName":tg["TargetGroupName"],"Target_health":target_health_descriptions})
+            targets = []
+            for target in target_health_descriptions:
+                instance_id = target.get("Target", {}).get("Id", "N/A")
+                if instance_id != "N/A":
+                    # Get instance name
+                    try:
+                        instance_details = ec2.describe_instances(InstanceIds=[instance_id])["Reservations"]
+                        name = next(
+                            (tag["Value"] for reservation in instance_details for instance in reservation["Instances"] for tag in instance.get("Tags", []) if tag["Key"] == "Name"),
+                            "N/A"
+                        )
+                    except Exception:
+                        name = "N/A"
+                else:
+                    name = "N/A"
+
+                targets.append(name)
+
+            target_group_info.append({
+                "Target Group": tg["TargetGroupName"],
+                "Port": tg["Port"],
+                "Protocol":tg["Protocol"],
+                "Instances": targets,
+            })
+        
+        lbs.append({
+            "Name": lb["LoadBalancerName"],
+            "Type": lb["Type"],
+            "Scheme" : lb["Scheme"],
+            "Vpc" : lb["VpcId"],
+            "SecurityGroups" :lb["SecurityGroups"],
+            "Listener":lsn_info,
+            
+        })
+    lb_all["lb_target_health"]=tg_health
+    return lbs,target_group_info, lb_all
+
+def collect_rds_resources(region):
+    """Collect RDS instance information in a region."""
+    rds = boto3.client("rds", region_name=region)
+    instances = []
+    rds_raw = rds.describe_db_instances()["DBInstances"]
+    for db in rds.describe_db_instances()["DBInstances"]:
+        instances.append({
+            "DBName": db["DBInstanceIdentifier"],
+
+            "Engine": db["Engine"],
+            "Class": db["DBInstanceClass"],
+            "Storage": db["AllocatedStorage"],
+            "MultiAZ": db["MultiAZ"],
+            "VpcId": db["DBSubnetGroup"]["VpcId"],
+        })
+    return instances,rds_raw
+
+def collect_vpc_resources(region):
+    """Collect VPC, Subnet, and SG information in a region."""
+    ec2 = boto3.client("ec2", region_name=region)
+    vpcs = []
+    sgs = []
+    Network_resources = {}
+
+    vpc_raw = ec2.describe_vpcs()["Vpcs"]
+    subnet_raw = ec2.describe_subnets()["Subnets"]
+    IGgateway_raw = ec2.describe_internet_gateways()["InternetGateways"]
+    sg_raw = ec2.describe_security_groups()["SecurityGroups"]
+
+    
+    Network_resources["vpc_raw"] = vpc_raw
+    Network_resources["subnet_raw"] = subnet_raw
+    Network_resources["IGgateway_raw"] = IGgateway_raw
+    Network_resources["sg_raw"] = sg_raw
+    #print(subnet_raw)
+    for sb in subnet_raw:
+        
+        vpc_name = next((tag["Value"] for tag in  ec2.describe_vpcs(VpcIds=[sb["VpcId"]])["Vpcs"][0].get("Tags", []) if tag["Key"] == "Name"), "N/A")
+        vpc_combine = vpc_name+"("+sb["VpcId"]+")"
+        vpcs.append({
+                "vpc":vpc_combine,
+                "SubnetName":  next((tag["Value"] for tag in sb.get("Tags", []) if tag["Key"] == "Name"), "N/A"),
+                "SubnetId": sb["SubnetId"],
+                "CIDR":sb["CidrBlock"],
+                "AvailabilityZone" : sb["AvailabilityZone"],
+                # "security_group" :security_group_name,
+                # "IGW":igw_name,
+                # "SecurityGroups": security_groups_info
+                # #"SecurityGroups": [{"GroupId": sg[0], "GroupName": sg[1]} for sg in subnet_sgs]
+            })
+        
+    
+    for sg in sg_raw:
+        vpc_name = next((tag["Value"] for tag in ec2.describe_vpcs(VpcIds=[sg["VpcId"]])["Vpcs"][0].get("Tags", []) if tag["Key"] == "Name"), "N/A")
+        vpc_combine = vpc_name+"("+sg["VpcId"]+")"
+        sgs.append({
+                "AttchedVPC":vpc_combine,
+                "Name":  next((tag["Value"] for tag in sg.get("Tags", []) if tag["Key"] == "Name"), "N/A"),
+                "Group Name":sg["GroupName"],
+                "GroupId": sg["GroupId"],
+                "Rules":summarize_security_group_rules(sg),
+              })
+    return vpcs, sgs, Network_resources
+
+def collect_s3_resources(region):
+    s3 = boto3.client('s3', region_name=region)
+    all_buckets_info = []
+    General_buckets_info = []
+    Directory_bucket_info =[]
+
+    # For general bucket
+    General_buckets_info = s3.list_buckets()["Buckets"]
+    for bucket in General_buckets_info:
+        all_buckets_info.append({
+            "Name": bucket["Name"],
+            "Type": "General Bucket"
         })
 
-    # Collect Load Balancers
-    lb_data = []
-    load_balancers = elb.describe_load_balancers()
-    for lb in load_balancers['LoadBalancers']:
-        lb_name = lb['LoadBalancerName']
-        lb_arn = lb['LoadBalancerArn']
-        target_groups = elb.describe_target_groups(LoadBalancerArn=lb_arn)['TargetGroups']
-        target_group_names = [tg['TargetGroupName'] for tg in target_groups]
+    # For directory Bucket
+    availableRegion = [ "us-east-1", "us-west-2", "ap-northeast-1", "eu-north-1" ]
+    
+    if region in availableRegion:
+        Directory_bucket_info = s3.list_directory_buckets()["Buckets"]
+        for bucket in Directory_bucket_info:
+            all_buckets_info.append({
+                "Name": bucket["Name"],
+                "Type": "Directory Bucket"
+            })
+    s3_raw = General_buckets_info + Directory_bucket_info
+    return all_buckets_info, s3_raw
 
-        lb_data.append({
-            'LoadBalancer': lb_name,
-            'ARN': lb_arn,
-            'TargetGroups': ', '.join(target_group_names)
-        })
-
-    return ec2_data, rds_data, lb_data
-
-# Function to draw graph using Graphviz
-def draw_graph(ec2_data, rds_data, lb_data):
-    dot = graphviz.Digraph(comment='AWS Topology')
-
-    # Add EC2 instances and relationships
-    with dot.subgraph() as s:
-        s.attr(rankdir='LR')
-        for instance in ec2_data:
-            # Create EC2 instance node
-            instance_node = f"{instance['InstanceId']} ({instance['Name']})"
-            dot.node(instance_node, f"EC2: {instance['Name']} ({instance['InstanceId']})")
-
-            # Add EBS volumes as nodes
-            for volume in instance['EBS Volumes'].split(', '):
-                ebs_node = f"Volume: {volume}"
-                dot.node(ebs_node, f"EBS: {volume}")
-                dot.edge(instance_node, ebs_node)  # Connect EC2 to EBS
-
-            # Connect EC2 to Subnet (displayed as a box)
-            subnet_node = f"Subnet: {instance['Subnet']}"
-            dot.node(subnet_node, f"Subnet: {instance['Subnet']}")
-            dot.edge(instance_node, subnet_node)
-
-    # Add Load Balancers and target groups
-    with dot.subgraph() as s:
-        s.attr(rankdir='LR')
-        for lb in lb_data:
-            lb_node = lb['LoadBalancer']
-            dot.node(lb_node, f"LB: {lb_node}")
-            for target_group in lb['TargetGroups'].split(', '):
-                tg_node = f"TG: {target_group}"
-                dot.node(tg_node, f"Target Group: {target_group}")
-                dot.edge(lb_node, tg_node)  # Connect LB to Target Group
-                
-                # Assuming EC2s in the Target Group
-                for instance in ec2_data:
-                    if lb_node in instance['EBS Volumes']:  # Example of EC2 in Target Group
-                        dot.edge(tg_node, instance['InstanceId'])  # Connect TG to EC2
-
-    # Render the graph to a file and display it
-    dot.render('/tmp/aws_topology', view=True)
-
-# Main function to handle argument parsing and execution
 def main():
-    parser = argparse.ArgumentParser(description="AWS Resource Collector and Visualizer")
-    parser.add_argument('-r', '--region', type=int, nargs='+', help="Specify region(s) by number", required=False)
-    parser.add_argument('-d', '--draw', action='store_true', help="Draw the topology graph")
-    parser.add_argument('-l', '--list', action='store_true', help="List all available AWS regions")
+    timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    logfilename = f"aws_resources_{timestamp}.log"
+    all_region_rawdata= []
+    parser = argparse.ArgumentParser(description="AWS Resource Collector")
+    parser.add_argument("-l", action="store_true", help="List all AWS regions")
+    parser.add_argument("-r", nargs="+", help="Specify region indices or names to list resources")
     args = parser.parse_args()
+    if len(sys.argv) == 1:   # Check if specify some parameters
+        parser.print_help()  # No Parameters
+        sys.exit(1)          
 
-    # List all available AWS regions
-    if args.list:
-        regions = list_regions()
-        print("Available regions:")
-        for i, region in enumerate(regions, start=1):
-            print(f"{i}: {region}")
+    regions = list_regions()
+
+    if args.l:
+        for idx, region in regions.items():
+            print(f"{idx}: {region}")
         return
 
-    # List all available regions and collect resources if -r is provided
-    if args.region:
-        regions = list_regions()
-        for region_index in args.region:
-            region = regions[region_index - 1]
-            print(f"Collecting resources for region: {region}")
+    if args.r:
+        # Convert region indices to region names
+        selected_regions = []
+        if "all" in args.r:
+            print("This will collect all regions information, it will take longer times.\n")
+            selected_regions = list(regions.values())
+        else:    
+            for r in args.r:
+                if r.isdigit():
+                    selected_regions.append(regions.get(int(r), "Unknown"))
+                else:
+                    selected_regions.append(r)
+        log_path = os.path.join("./output", logfilename)
+        os.makedirs("./output", exist_ok=True)
+        log_file = open(log_path, "a")
+        sys.stdout = TeeOutput(sys.stdout, log_file)
+        sys.stderr = TeeOutput(sys.stderr, log_file)
 
-            # Collect the resources in the selected region
-            ec2_data, rds_data, lb_data = collect_resources(region)
+        for region in selected_regions:
+            print(f"\n{'-'*30} {region} {'-'*30}")
+            region_resources = {"region": region, "collected_resources": {}}
 
-            # Display the resource tables
+            ec2_data, region_resources["collected_resources"]["ec2"] = collect_ec2_resources(region)
             print("\nEC2 Instances:")
-            print(tabulate(ec2_data, headers="keys", tablefmt="pretty"))
+            print_table(ec2_data)
+
+            ebs_data, region_resources["collected_resources"]["ebs"] = collect_ebs_resources(region)            
+            print("\nEBS Volumes:")
+            print_table(ebs_data)
+
+            rds_data, region_resources["collected_resources"]["rds"] = collect_rds_resources(region)
             print("\nRDS Instances:")
-            print(tabulate(rds_data, headers="keys", tablefmt="pretty"))
+            print_table(rds_data)
+
+            vpc_data, sgs_data, region_resources["collected_resources"]["network"] = collect_vpc_resources(region)
+            print("\nVPCs:")
+            print_table(vpc_data, sortKey="vpc")
+
+            print("\nSecurity Groups:")
+            print_table(sgs_data,sortKey="AttchedVPC")
+            
+            lb_data, tg_info, region_resources["collected_resources"]["loadbalancer"] = collect_lb_resources(region)     
             print("\nLoad Balancers:")
-            print(tabulate(lb_data, headers="keys", tablefmt="pretty"))
+            print_table(expand_listeners_with_condensed_fields(lb_data))
+            print_table(tg_info)
 
-            # If -d is provided, draw the graph
-            if args.draw:
-                draw_graph(ec2_data, rds_data, lb_data)
+            s3_data , region_resources["collected_resources"]["s3"] = collect_s3_resources(region)
+            print("\nS3 Information:")
+            print_table(s3_data)
 
+            all_region_rawdata.append(region_resources)
+
+        save_region_resources_to_json(all_region_rawdata)
+        #log_file.close()
 if __name__ == "__main__":
     main()
