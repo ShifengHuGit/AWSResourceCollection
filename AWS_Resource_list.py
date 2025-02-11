@@ -383,16 +383,20 @@ def collect_s3_resources(region):
             "Type": "General Bucket"
         })
 
-    # For directory Bucket
-    availableRegion = [ "us-east-1", "us-west-2", "ap-northeast-1", "eu-north-1" ]
+#  2025-02-11  Shifeng Hu
+# ListDirectoryBucketの機能はReadOnly権限では動作しないため、一時的にコメントアウトしました。
+#
+
+#   # # For directory Bucket
+    # availableRegion = [ "us-east-1", "us-west-2", "ap-northeast-1", "eu-north-1" ]
     
-    if region in availableRegion:
-        Directory_bucket_info = s3.list_directory_buckets()["Buckets"]
-        for bucket in Directory_bucket_info:
-            all_buckets_info.append({
-                "Name": bucket["Name"],
-                "Type": "Directory Bucket"
-            })
+    # if region in availableRegion:
+    #     Directory_bucket_info = s3.list_directory_buckets()["Buckets"]
+    #     for bucket in Directory_bucket_info:
+    #         all_buckets_info.append({
+    #             "Name": bucket["Name"],
+    #             "Type": "Directory Bucket"
+    #         })
     s3_raw = General_buckets_info + Directory_bucket_info
     return all_buckets_info, s3_raw
 
