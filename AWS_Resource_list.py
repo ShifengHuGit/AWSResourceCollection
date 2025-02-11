@@ -305,20 +305,62 @@ def collect_lb_resources(region):
     lb_all["lb_target_health"]=tg_health
     return lbs,target_group_info, lb_all
 
+
+
+
 def collect_rds_resources(region):
     """Collect RDS instance information in a region."""
     rds = boto3.client("rds", region_name=region)
+    ec2 = boto3.client('ec2', region_name=region)
     instances = []
+    
+    RDS_PORTS = [1521, 3306, 5432, 1433, 6379] 
     rds_raw = rds.describe_db_instances()["DBInstances"]
     for db in rds.describe_db_instances()["DBInstances"]:
+        Paired_SG = []
+        vpc_security_groups = db.get('VpcSecurityGroups', [])
+        for security_group in vpc_security_groups:
+            security_group_id = security_group['VpcSecurityGroupId']
+            #print(f"Checking Security Group: {security_group_id} for RDS Instance: {db['DBInstanceIdentifier']}")
+            
+            # 获取 Security Group 的详细信息
+            sg_response = ec2.describe_security_groups(GroupIds=[security_group_id])
+            
+            # 遍历 IpPermissions 并检查 UserIdGroupPairs
+            for sg in sg_response['SecurityGroups']:
+                for permission in sg.get('IpPermissions', []):
+                    from_port = permission.get('FromPort')
+                    to_port = permission.get('ToPort')
+                    if from_port is not None and to_port is not None:
+                        # 如果端口在 RDS 服务端口列表中，则继续检查
+                        if from_port == to_port and from_port in RDS_PORTS:
+                            for user_group in permission.get('UserIdGroupPairs', []):
+                                group_id = user_group.get('GroupId')
+                                if group_id:
+                                    #print(f"Found GroupId: {group_id} in Security Group: {security_group_id}")
+                                    Paired_SG.append(group_id)
+        response = ec2.describe_instances(
+            Filters=[
+                 {
+                        "Name": "network-interface.group-id",
+                        "Values": Paired_SG
+                    }
+                ]
+        )
+        attached_instance_list = []
+        for reservation in response.get('Reservations', []):
+            for instance in reservation.get('Instances', []):
+                #print(f"Instance ID: {instance['InstanceId']}, State: {instance['State']['Name']}")
+                attached_instance_list.append( instance['InstanceId'] )
+                
         instances.append({
             "DBName": db["DBInstanceIdentifier"],
-
             "Engine": db["Engine"],
             "Class": db["DBInstanceClass"],
             "Storage": db["AllocatedStorage"],
             "MultiAZ": db["MultiAZ"],
             "VpcId": db["DBSubnetGroup"]["VpcId"],
+            "Connected EC2" : attached_instance_list,
         })
     return instances,rds_raw
 
