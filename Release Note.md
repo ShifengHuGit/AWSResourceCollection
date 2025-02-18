@@ -28,4 +28,4 @@
 
 ### 🖥 実行例
 - 表形式の出力を使用しているため、内容が折り返されずに表示されるように、スクリプトを全画面で実行することを推奨します
-![Snapshot](https://github.com/ShifengHuGit/AWSResourceCollection/blob/fdda8369729a58834ce34d33b3cdff92db45e66a/image.png)
+![Snapshot](https://github.com/ShifengHuGit/AWSResourceCollection/blob/f1e2da2290bf91024caa74714ec77fc8e2570514/image.png)
