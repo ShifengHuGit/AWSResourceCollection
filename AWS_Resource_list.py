@@ -5,6 +5,7 @@ import datetime
 import os
 import sys
 
+VERSION = "0.1.0"  # 2025-02-18  
 
 class TeeOutput:
     def __init__(self, *streams):
@@ -71,6 +72,37 @@ def list_regions():
     regions = ec2.describe_regions()["Regions"]
     region_list = {i + 1: region["RegionName"] for i, region in enumerate(regions)}
     return region_list
+
+def reformat(data, key):
+    reformatted_data = []
+    
+    for item in data:
+        if key in item and isinstance(item[key], list):
+            list_items = item[key]
+            
+            # 如果列表只有一个元素，则直接将其转换为字符串
+            if len(list_items) == 1:
+                new_item = item.copy()  # 拷贝原始字典
+                new_item[key] = list_items[0]  # 将 key 的值设置为列表中的唯一元素
+                reformatted_data.append(new_item)
+            else:
+                # 处理第一个元素，保留原来的所有字段
+                first_item = item.copy()
+                first_item[key] = list_items[0]
+                reformatted_data.append(first_item)
+                
+                # 处理后续元素，只保留 key 字段，其他字段为空
+
+                for value in list_items[1:]:
+                    new_item = {k: (value if k == key else item[k] if k == "Name" else "") for k in item}  # 保留 "Name" 和 "key" 字段，其他字段为空
+                    reformatted_data.append(new_item)
+                
+        else:
+            # 如果 key 不存在或者不是列表，保留原始项
+            reformatted_data.append(item)
+    
+    return reformatted_data
+
 
 def print_table(data, sortKey=None):
     """
@@ -195,17 +227,25 @@ def collect_ec2_resources(region):
             subnet = instance.get("SubnetId", "N/A")
             vpc = instance.get("VpcId", "N/A")
             publicIPv4 = instance.get("PublicIpAddress", "N/A")
+            ami_id = instance.get("ImageId", "N/A")
+            ami_response = ec2.describe_images(ImageIds=[ami_id])
+            if ami_response['Images']:
+                ami_info = ami_response['Images'][0]  # 取第一个结果
+                ami_name = ami_info.get('Name', 'Unknown')  # AMI 名称
+                ami_description = ami_info.get('Description', 'No Description')  # AMI 描述
+                ami_os = ami_info.get('PlatformDetails', 'Unknown')  # Windows
             instances.append({
                 "Name": name,
                 "State": instance["State"]["Name"],
                 "Type": instance["InstanceType"],
+                "OS" : ami_os,
                 "InstanceId": instance["InstanceId"],
                 "PublicIP": publicIPv4,
                 "EBS": ebs_volumes,
                 "VPC": vpc,
                 "Subnet": subnet,
             })
-    return instances, ec2_raw
+    return reformat(instances,"EBS"), ec2_raw
 
 def collect_ebs_resources(region):
     """Collect EBS volume information in a region."""
@@ -214,13 +254,13 @@ def collect_ebs_resources(region):
     ebs_raw = ec2.describe_volumes()["Volumes"]
 
     for volume in ec2.describe_volumes()["Volumes"]:
-        name = next((tag["Value"] for tag in volume.get("Tags", []) if tag["Key"] == "Name"), "N/A")
+        #name = next((tag["Value"] for tag in volume.get("Tags", []) if tag["Key"] == "Name"), "N/A")
         volumes.append({
-            "Name": name,
-            "Size": volume["Size"],
+            "VolumeId": volume["VolumeId"],
+            #"Name": name,
+            "Size(GB)": volume["Size"],
             "IOPS":volume["Iops"],
             "VolumeType":volume["VolumeType"],
-            "VolumeId": volume["VolumeId"],
             "Attached_Instance":volume["Attachments"][0]["InstanceId"],
         })
     return volumes,ebs_raw
@@ -352,9 +392,9 @@ def collect_rds_resources(region):
             for instance in reservation.get('Instances', []):
                 #print(f"Instance ID: {instance['InstanceId']}, State: {instance['State']['Name']}")
                 attached_instance_list.append( instance['InstanceId'] )
-                
+
         instances.append({
-            "DBName": db["DBInstanceIdentifier"],
+            "Name": db["DBInstanceIdentifier"],
             "Engine": db["Engine"],
             "Class": db["DBInstanceClass"],
             "Storage": db["AllocatedStorage"],
@@ -362,7 +402,7 @@ def collect_rds_resources(region):
             "VpcId": db["DBSubnetGroup"]["VpcId"],
             "Connected EC2" : attached_instance_list,
         })
-    return instances,rds_raw
+    return reformat(instances,"Connected EC2"),rds_raw
 
 def collect_vpc_resources(region):
     """Collect VPC, Subnet, and SG information in a region."""
@@ -449,7 +489,13 @@ def main():
     parser = argparse.ArgumentParser(description="AWS Resource Collector")
     parser.add_argument("-l", action="store_true", help="List all AWS regions")
     parser.add_argument("-r", nargs="+", help="Specify region indices or names to list resources")
+    parser.add_argument("-v", "--version", action="store_true", help="Show version information") 
     args = parser.parse_args()
+
+    if args.version:
+        print(f"AWS Resource Collector Version: {VERSION}")
+        sys.exit(0)
+
     if len(sys.argv) == 1:   # Check if specify some parameters
         parser.print_help()  # No Parameters
         sys.exit(1)          
