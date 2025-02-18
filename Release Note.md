@@ -25,3 +25,7 @@
 - 構成図生成  
 - 別のサービスの収集  
 - その他  
+
+### 🖥 実行例
+- 表形式の出力を使用しているため、内容が折り返されずに表示されるように、スクリプトを全画面で実行することを推奨します
+![Snapshot](https://github.com/ShifengHuGit/AWSResourceCollection/blob/fdda8369729a58834ce34d33b3cdff92db45e66a/image.png)
