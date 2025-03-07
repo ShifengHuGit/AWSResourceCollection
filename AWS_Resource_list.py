@@ -497,6 +497,46 @@ def collect_vpc_resources(region):
               })
     return vpcs, sgs, Network_resources
 
+# to check size of Bucket via Cloudwatch
+def get_s3_bucket_size(bucket_name, region):
+    cloudwatch = boto3.client('cloudwatch', region_name=region)
+    
+    # get timestamp (now) and (1 hour before)
+    end_time = datetime.datetime.utcnow()
+    start_time = end_time - datetime.timedelta(days=3)
+
+    # check bucket size
+    response = cloudwatch.get_metric_statistics(
+        Namespace='AWS/S3',
+        MetricName='BucketSizeBytes',
+        Dimensions=[
+            {
+                'Name': 'BucketName',
+                'Value': bucket_name
+            },
+            {
+                'Name': 'StorageType',
+                'Value': 'StandardStorage'
+            }
+        ],
+        StartTime=start_time,
+        EndTime=end_time,
+        Period=86400,  # 1 hour
+        Statistics=['Maximum']
+    )
+
+    
+    datapoints = response['Datapoints']
+    if datapoints:
+        size_in_bytes = datapoints[0]['Maximum']
+        size_in_mb = size_in_bytes / (1024 * 1024)
+        #print(f"Bucket Size for '{bucket_name}' is {size_in_bytes} bytes.")
+        return round(size_in_mb,2)
+    else:
+        #print(f"No data found for bucket {bucket_name}.")
+        return 0
+
+
 def collect_s3_resources(region):
     s3 = boto3.client('s3', region_name=region)
     all_buckets_info = []
@@ -504,12 +544,19 @@ def collect_s3_resources(region):
     Directory_bucket_info =[]
 
     # For general bucket
-    General_buckets_info = s3.list_buckets()["Buckets"]
-    for bucket in General_buckets_info:
-        all_buckets_info.append({
-            "Name": bucket["Name"],
-            "Type": "General Bucket"
-        })
+    all_buckets_info = s3.list_buckets()["Buckets"]
+    for bucket in all_buckets_info:
+        # Get the region of the bucket
+        bucket_region = s3.get_bucket_location(Bucket=bucket["Name"])["LocationConstraint"]
+
+        # If the region matches the specified region
+        if bucket_region == region:
+            
+            General_buckets_info.append({
+                "Name": bucket["Name"],
+                "Type": "General Bucket",
+                "Szie": f'{get_s3_bucket_size(bucket["Name"], region)} MB',
+            })
 
 #  2025-02-11  Shifeng Hu
 # ListDirectoryBucketの機能はReadOnly権限では動作しないため、一時的にコメントアウトしました。
@@ -526,7 +573,7 @@ def collect_s3_resources(region):
     #             "Type": "Directory Bucket"
     #         })
     s3_raw = General_buckets_info + Directory_bucket_info
-    return all_buckets_info, s3_raw
+    return General_buckets_info, s3_raw
 
 def main():
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
