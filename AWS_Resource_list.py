@@ -4,8 +4,11 @@ import argparse
 import datetime
 import os
 import sys
+import csv
+import zipfile
 
 VERSION = "0.1.0"  # 2025-02-18  
+VERSION = "0.1.1"  # 2025-03-06   
 
 class TeeOutput:
     def __init__(self, *streams):
@@ -103,14 +106,13 @@ def reformat(data, key):
     
     return reformatted_data
 
-
 def print_table(data, sortKey=None):
     """
-    Print a table with the given data and headers in a formatted manner.
-    The first column values are merged if they are the same as the previous row.
+        Print a table with the given data and headers in a formatted manner.
+        The first column values are merged if they are the same as the previous row.
 
-    :param data: List of dictionaries containing the table data.
-    :param headers: List of column headers.
+        :param data: List of dictionaries containing the table data.
+        :param headers: List of column headers.
     """
     if not data:  # Check if empty
         print("No data available to display.")
@@ -214,6 +216,49 @@ def expand_listeners_with_condensed_fields(lbs):
 
     return expanded_lbs
 
+""" 2025-03-06  Add generate CSV function"""
+def save_to_csv(data, filename):
+    """Save collected data to a CSV file."""
+    if not data:
+        print("No data to save.")
+        return
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    keys = data[0].keys()
+    
+    with open(filename, "w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(data)
+    #print(f"Data saved to {filename}")
+
+""" 2025-03-06  Add generate CSV function"""
+def compress_zip(zip_filename,output_folder):
+    with zipfile.ZipFile(f"./output/{zip_filename}", "w", zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(output_folder):  
+            for file in files:
+                if file.endswith(".csv"):  
+                    file_path = os.path.join(root, file)  
+                    arcname = os.path.relpath(file_path, output_folder) 
+                    zipf.write(file_path, arcname=arcname) 
+    for root, _, files in os.walk(output_folder):
+        for file in files:
+            if file.endswith(".csv"):
+                file_path = os.path.join(root, file)
+                os.remove(file_path)  
+    for root, dirs, _ in os.walk(output_folder, topdown=False):  
+        for d in dirs:
+            dir_path = os.path.join(root, d)
+            if not os.listdir(dir_path): 
+                os.rmdir(dir_path)  
+    print(f"Zip file Created:{zip_filename}")
+
+""" 以下のコードは AWS 上のリソースを収集するもので、現在サポートしているのは 
+ * EC2 
+ * EBS
+ * ロードバランサー
+ * RDS 
+ * VPC
+ * S3  """
 def collect_ec2_resources(region):
     """Collect EC2 instance information in a region."""
     ec2 = boto3.client("ec2", region_name=region)
@@ -245,7 +290,7 @@ def collect_ec2_resources(region):
                 "VPC": vpc,
                 "Subnet": subnet,
             })
-    return reformat(instances,"EBS"), ec2_raw
+    return instances, ec2_raw
 
 def collect_ebs_resources(region):
     """Collect EBS volume information in a region."""
@@ -255,13 +300,17 @@ def collect_ebs_resources(region):
 
     for volume in ec2.describe_volumes()["Volumes"]:
         #name = next((tag["Value"] for tag in volume.get("Tags", []) if tag["Key"] == "Name"), "N/A")
+        """ minor bug: volume may not attached to EC2"""
+        attached_instance = "Not attached"  # Default is "Not attached"
+        if volume["Attachments"]:
+            attached_instance = volume["Attachments"][0]["InstanceId"]
         volumes.append({
             "VolumeId": volume["VolumeId"],
             #"Name": name,
             "Size(GB)": volume["Size"],
             "IOPS":volume["Iops"],
             "VolumeType":volume["VolumeType"],
-            "Attached_Instance":volume["Attachments"][0]["InstanceId"],
+            "Attached_Instance":attached_instance,
         })
     return volumes,ebs_raw
 
@@ -345,9 +394,6 @@ def collect_lb_resources(region):
     lb_all["lb_target_health"]=tg_health
     return lbs,target_group_info, lb_all
 
-
-
-
 def collect_rds_resources(region):
     """Collect RDS instance information in a region."""
     rds = boto3.client("rds", region_name=region)
@@ -363,16 +409,16 @@ def collect_rds_resources(region):
             security_group_id = security_group['VpcSecurityGroupId']
             #print(f"Checking Security Group: {security_group_id} for RDS Instance: {db['DBInstanceIdentifier']}")
             
-            # 获取 Security Group 的详细信息
+            #  Security Group  Detail
             sg_response = ec2.describe_security_groups(GroupIds=[security_group_id])
             
-            # 遍历 IpPermissions 并检查 UserIdGroupPairs
+            # look up IpPermissions and check UserIdGroupPairs
             for sg in sg_response['SecurityGroups']:
                 for permission in sg.get('IpPermissions', []):
                     from_port = permission.get('FromPort')
                     to_port = permission.get('ToPort')
                     if from_port is not None and to_port is not None:
-                        # 如果端口在 RDS 服务端口列表中，则继续检查
+                        # if RDS port there ,then continue 
                         if from_port == to_port and from_port in RDS_PORTS:
                             for user_group in permission.get('UserIdGroupPairs', []):
                                 group_id = user_group.get('GroupId')
@@ -402,7 +448,7 @@ def collect_rds_resources(region):
             "VpcId": db["DBSubnetGroup"]["VpcId"],
             "Connected EC2" : attached_instance_list,
         })
-    return reformat(instances,"Connected EC2"),rds_raw
+    return instances,rds_raw
 
 def collect_vpc_resources(region):
     """Collect VPC, Subnet, and SG information in a region."""
@@ -486,6 +532,9 @@ def main():
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     logfilename = f"aws_resources_{timestamp}.log"
     all_region_rawdata= []
+    output_folder = "output"  
+    zip_filename = f"csv_{timestamp}.zip"  
+
     parser = argparse.ArgumentParser(description="AWS Resource Collector")
     parser.add_argument("-l", action="store_true", help="List all AWS regions")
     parser.add_argument("-r", nargs="+", help="Specify region indices or names to list resources")
@@ -531,35 +580,55 @@ def main():
 
             ec2_data, region_resources["collected_resources"]["ec2"] = collect_ec2_resources(region)
             print("\nEC2 Instances:")
-            print_table(ec2_data)
+            print_table(reformat(ec2_data,"EBS"))
+            # 2025-03-07 : Add saving csv file function
+            save_to_csv(ec2_data, f"./output/{region}/ec2.csv")
 
             ebs_data, region_resources["collected_resources"]["ebs"] = collect_ebs_resources(region)            
             print("\nEBS Volumes:")
             print_table(ebs_data)
+            # 2025-03-07 : Add saving csv file function
+            save_to_csv(ebs_data, f"./output/{region}/ebs.csv")
 
             rds_data, region_resources["collected_resources"]["rds"] = collect_rds_resources(region)
             print("\nRDS Instances:")
-            print_table(rds_data)
+            print_table(reformat(rds_data,"Connected EC2"))
+            # 2025-03-07 : Add saving csv file function
+            save_to_csv(rds_data, f"./output/{region}/rds.csv")
 
             vpc_data, sgs_data, region_resources["collected_resources"]["network"] = collect_vpc_resources(region)
             print("\nVPCs:")
             print_table(vpc_data, sortKey="vpc")
+            # 2025-03-07 : Add saving csv file function
+            save_to_csv(vpc_data, f"./output/{region}/vpc.csv")
 
             print("\nSecurity Groups:")
             print_table(sgs_data,sortKey="AttchedVPC")
+            # 2025-03-07 : Add saving csv file function
+            save_to_csv(sgs_data, f"./output/{region}/vpc-securityGroup.csv")
             
             lb_data, tg_info, region_resources["collected_resources"]["loadbalancer"] = collect_lb_resources(region)     
             print("\nLoad Balancers:")
             print_table(expand_listeners_with_condensed_fields(lb_data))
             print_table(tg_info)
+            # 2025-03-07 : Add saving csv file function
+            save_to_csv(lb_data, f"./output/{region}/loadbalancer.csv")
+            save_to_csv(tg_info, f"./output/{region}/loadbalancer_targetGroup.csv")
+
 
             s3_data , region_resources["collected_resources"]["s3"] = collect_s3_resources(region)
             print("\nS3 Information:")
             print_table(s3_data)
-
+            # 2025-03-07 : Add saving csv file function
+            save_to_csv(s3_data, f"./output/{region}/s3.csv")
             all_region_rawdata.append(region_resources)
 
         save_region_resources_to_json(all_region_rawdata)
+        
+        # Compress csv to zip file
+        # 2025-03-07 :  csv file compress function
+        compress_zip(zip_filename,output_folder)
+ 
         #log_file.close()
 if __name__ == "__main__":
     main()
