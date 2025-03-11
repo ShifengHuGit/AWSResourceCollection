@@ -263,6 +263,7 @@ def collect_ec2_resources(region):
     """Collect EC2 instance information in a region."""
     ec2 = boto3.client("ec2", region_name=region)
     instances = []
+    ami_os = "Unknown"
     ec2_raw = ec2.describe_instances()["Reservations"]
     for reservation in ec2.describe_instances()["Reservations"]:
         for instance in reservation["Instances"]:
@@ -446,7 +447,7 @@ def collect_rds_resources(region):
             "Storage": db["AllocatedStorage"],
             "MultiAZ": db["MultiAZ"],
             "VpcId": db["DBSubnetGroup"]["VpcId"],
-            "Connected EC2" : attached_instance_list,
+            "Connected EC2" :attached_instance_list if attached_instance_list else "unknown",
         })
     return instances,rds_raw
 
