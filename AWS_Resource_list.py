@@ -68,6 +68,7 @@ def save_region_resources_to_json(region_data, output_dir="output"):
         json.dump(region_data, file, indent=4, default=json_serializer)
 
     print(f"\nAll Data (JSON formatted) saved to {filepath}")
+    return filepath
 
 def list_regions():
     """List all AWS regions with indices."""
@@ -91,7 +92,10 @@ def reformat(data, key):
             else:
                 # 处理第一个元素，保留原来的所有字段
                 first_item = item.copy()
-                first_item[key] = list_items[0]
+                if first_item:
+                    first_item[key] = list_items[0]
+                else:
+                    first_item[key] =None
                 reformatted_data.append(first_item)
                 
                 # 处理后续元素，只保留 key 字段，其他字段为空
@@ -232,14 +236,23 @@ def save_to_csv(data, filename):
     #print(f"Data saved to {filename}")
 
 """ 2025-03-06  Add generate CSV function"""
-def compress_zip(zip_filename,output_folder):
+def compress_zip(zip_filename, output_folder, extra_files):
     with zipfile.ZipFile(f"./output/{zip_filename}", "w", zipfile.ZIP_DEFLATED) as zipf:
+        #this part is for compress all CSV format files
         for root, _, files in os.walk(output_folder):  
             for file in files:
                 if file.endswith(".csv"):  
                     file_path = os.path.join(root, file)  
                     arcname = os.path.relpath(file_path, output_folder) 
                     zipf.write(file_path, arcname=arcname) 
+        #this is for log and json files.
+        for file in extra_files:
+            if os.path.exists(file):  # Make sure files are exist
+                zipf.write(file, arcname=os.path.basename(file))
+                os.remove(file)
+            else:
+                print(f"Warning: {file} not exist, please check!")
+
     for root, _, files in os.walk(output_folder):
         for file in files:
             if file.endswith(".csv"):
@@ -250,6 +263,7 @@ def compress_zip(zip_filename,output_folder):
             dir_path = os.path.join(root, d)
             if not os.listdir(dir_path): 
                 os.rmdir(dir_path)  
+
     print(f"Zip file Created:{zip_filename}")
 
 """ 以下のコードは AWS 上のリソースを収集するもので、現在サポートしているのは 
@@ -671,11 +685,12 @@ def main():
             save_to_csv(s3_data, f"./output/{region}/s3.csv")
             all_region_rawdata.append(region_resources)
 
-        save_region_resources_to_json(all_region_rawdata)
-        
+        # 2025-03-11: move the log and json file to Zip file
+        json_file = save_region_resources_to_json(all_region_rawdata)
+        extra_files = [json_file, log_path]
         # Compress csv to zip file
         # 2025-03-07 :  csv file compress function
-        compress_zip(zip_filename,output_folder)
+        compress_zip(zip_filename,output_folder,extra_files)
  
         #log_file.close()
 if __name__ == "__main__":
