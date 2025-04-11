@@ -66,8 +66,8 @@ def save_region_resources_to_json(region_data, output_dir="output"):
     # Save the data to the file
     with open(filepath, "w") as file:
         json.dump(region_data, file, indent=4, default=json_serializer)
-
-    print(f"\nAll Data (JSON formatted) saved to {filepath}")
+    
+    #print(f"\nAll Data (JSON formatted) saved to {filepath}")
     return filepath
 
 def list_regions():
@@ -237,6 +237,7 @@ def save_to_csv(data, filename):
 
 """ 2025-03-06  Add generate CSV function"""
 def compress_zip(zip_filename, output_folder, extra_files):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
     with zipfile.ZipFile(f"./output/{zip_filename}", "w", zipfile.ZIP_DEFLATED) as zipf:
         #this part is for compress all CSV format files
         for root, _, files in os.walk(output_folder):  
@@ -263,8 +264,12 @@ def compress_zip(zip_filename, output_folder, extra_files):
             dir_path = os.path.join(root, d)
             if not os.listdir(dir_path): 
                 os.rmdir(dir_path)  
-
-    print(f"Zip file Created:{zip_filename}")
+    #2025-04-11 Shifeng　hu　出力内容更新．　AWSコンソールからファイルをDownloadするため、直接的に場所を表示するようにします
+    print("")
+    print("------------------------------------ Completed! --------------------------------------------")
+    print(f"All output files (log, json files and csv files) have been packaged into the following file")
+    print(f"Path:  {script_dir}/{output_folder}/{zip_filename}")
+    print("")
 
 """ 以下のコードは AWS 上のリソースを収集するもので、現在サポートしているのは 
  * EC2 
